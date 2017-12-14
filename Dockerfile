@@ -21,6 +21,9 @@ ENV LANG en_US.UTF-8
 ENV LANGUAGE en_US.UTF-8
 ENV LC_ALL en_US.UTF-8
 
+# Install virtualenv
+RUN sudo pip install virtualenv
+
 # Creates a custom user to avoid using root.
 # We do also force the 2000 UID to match the host
 # user and avoid permissions problems.
