@@ -1,80 +1,128 @@
-FROM python:3.6.3-jessie
+FROM jcorral/docker-devenv-base
 LABEL maintainer "jmc.leira@gmail.com"
 
-# Install development tools.
-RUN apt-get update && apt-get install -y \
-  build-essential \
-  cmake \
-  zsh \
-  locales
+USER root
+# The following commands are copied from the dockerhub alpine dockerfile.
 
-# Install Vim dependencies
-RUN apt-get install -y libncurses5-dev libgnome2-dev libgnomeui-dev \
-    libgtk2.0-dev libatk1.0-dev libbonoboui2-dev \
-    libcairo2-dev libx11-dev libxpm-dev libxt-dev python-dev \
-    python3-dev ruby-dev lua5.1 lua5.1-dev libperl-dev git
+# ensure local python is preferred over distribution python
+ENV PATH /usr/local/bin:$PATH
 
-RUN git clone https://github.com/vim/vim.git /tmp/vim && \
-    cd /tmp/vim && ./configure --with-features=huge \
-                               --enable-multibyte \
-                               --enable-rubyinterp=yes \
-                               --enable-pythoninterp=yes \
-                               --enable-python3interp=yes \
-                               --with-python3-config-dir=/usr/lib/python3.6/config \
-                               --enable-perlinterp=yes \
-                               --enable-luainterp=yes \
-                               --enable-gui=gtk2 \
-                               --enable-cscope \
-                               --prefix=/usr/local && \
-    make install && VIMRUNTIMEDIR=/usr/local/share/vim/vim80
+# http://bugs.python.org/issue19846
+# > At the moment, setting "LANG=C" on a Linux system *fundamentally breaks Python 3*, and that's not OK.
+ENV LANG C.UTF-8
 
-# Configure locales.
-ENV DEBIAN_FRONTEND noninteractive
-RUN echo "en_US.UTF-8 UTF-8" > /etc/locale.gen && \
-    locale-gen en_US.UTF-8 && \
-    dpkg-reconfigure locales && \
-    /usr/sbin/update-locale LANG=en_US.UTF-8
+# install ca-certificates so that HTTPS works consistently
+# the other runtime dependencies for Python are installed later
+RUN apk add --no-cache ca-certificates
 
-ENV LANG en_US.UTF-8
-ENV LANGUAGE en_US.UTF-8
-ENV LC_ALL en_US.UTF-8
+ENV GPG_KEY 0D96DF4D4110E5C43FBFB17F2D347EA6AA65421D
+ENV PYTHON_VERSION 3.7.0a3
 
-# Install virtualenv
-RUN pip install virtualenv
+RUN set -ex \
+	&& apk add --no-cache --virtual .fetch-deps \
+		gnupg \
+		libressl \
+		tar \
+		xz \
+	\
+	&& wget -O python.tar.xz "https://www.python.org/ftp/python/${PYTHON_VERSION%%[a-z]*}/Python-$PYTHON_VERSION.tar.xz" \
+	&& wget -O python.tar.xz.asc "https://www.python.org/ftp/python/${PYTHON_VERSION%%[a-z]*}/Python-$PYTHON_VERSION.tar.xz.asc" \
+	&& export GNUPGHOME="$(mktemp -d)" \
+	&& gpg --keyserver ha.pool.sks-keyservers.net --recv-keys "$GPG_KEY" \
+	&& gpg --batch --verify python.tar.xz.asc python.tar.xz \
+	&& rm -rf "$GNUPGHOME" python.tar.xz.asc \
+	&& mkdir -p /usr/src/python \
+	&& tar -xJC /usr/src/python --strip-components=1 -f python.tar.xz \
+	&& rm python.tar.xz \
+	\
+	&& apk add --no-cache --virtual .build-deps  \
+		bzip2-dev \
+		coreutils \
+		dpkg-dev dpkg \
+		expat-dev \
+		gcc \
+		gdbm-dev \
+		libc-dev \
+		libffi-dev \
+		linux-headers \
+		make \
+		ncurses-dev \
+		libressl \
+		libressl-dev \
+		pax-utils \
+		readline-dev \
+		sqlite-dev \
+		tcl-dev \
+		tk \
+		tk-dev \
+		xz-dev \
+		zlib-dev \
+# add build deps before removing fetch deps in case there's overlap
+	&& apk del .fetch-deps \
+	\
+	&& cd /usr/src/python \
+	&& gnuArch="$(dpkg-architecture --query DEB_BUILD_GNU_TYPE)" \
+	&& ./configure \
+		--build="$gnuArch" \
+		--enable-loadable-sqlite-extensions \
+		--enable-shared \
+		--with-system-expat \
+		--with-system-ffi \
+		--without-ensurepip \
+	&& make -j "$(nproc)" \
+	&& make install \
+	\
+	&& runDeps="$( \
+		scanelf --needed --nobanner --format '%n#p' --recursive /usr/local \
+			| tr ',' '\n' \
+			| sort -u \
+			| awk 'system("[ -e /usr/local/lib/" $1 " ]") == 0 { next } { print "so:" $1 }' \
+	)" \
+	&& apk add --virtual .python-rundeps $runDeps \
+	&& apk del .build-deps \
+	\
+	&& find /usr/local -depth \
+		\( \
+			\( -type d -a \( -name test -o -name tests \) \) \
+			-o \
+			\( -type f -a \( -name '*.pyc' -o -name '*.pyo' \) \) \
+		\) -exec rm -rf '{}' + \
+	&& rm -rf /usr/src/python
 
-# Creates a custom user to avoid using root.
-# We do also force the 2000 UID to match the host
-# user and avoid permissions problems.
-# There are some issues about it:
-# https://github.com/docker/docker/issues/2259
-# https://github.com/nodejs/docker-node/issues/289
-RUN  useradd -ms /bin/bash dev && \
-  usermod -o -u 2000 dev
+# make some useful symlinks that are expected to exist
+RUN cd /usr/local/bin \
+	&& ln -s idle3 idle \
+	&& ln -s pydoc3 pydoc \
+	&& ln -s python3 python \
+	&& ln -s python3-config python-config
 
-# Set the working dir
-WORKDIR /home/dev
+# if this is called "PIP_VERSION", pip explodes with "ValueError: invalid truth value '<VERSION>'"
+ENV PYTHON_PIP_VERSION 9.0.1
 
-# Run from the dev user.
+RUN set -ex; \
+	\
+	apk add --no-cache --virtual .fetch-deps libressl; \
+	\
+	wget -O get-pip.py 'https://bootstrap.pypa.io/get-pip.py'; \
+	\
+	apk del .fetch-deps; \
+	\
+	python get-pip.py \
+		--disable-pip-version-check \
+		--no-cache-dir \
+		"pip==$PYTHON_PIP_VERSION" \
+	; \
+	pip --version; \
+	\
+	find /usr/local -depth \
+		\( \
+			\( -type d -a \( -name test -o -name tests \) \) \
+			-o \
+			\( -type f -a \( -name '*.pyc' -o -name '*.pyo' \) \) \
+		\) -exec rm -rf '{}' +; \
+	rm -f get-pip.py
+
+
 USER dev
-
-# Install oh my zsh
-RUN wget https://github.com/robbyrussell/oh-my-zsh/raw/master/tools/install.sh -O - | zsh || true
-
-# Instal fzf
-RUN git clone --depth 1 https://github.com/junegunn/fzf.git ~/.fzf && \
-    ~/.fzf/install --bin
-
-# Download custom preferences using dotfiles.
-RUN git clone https://github.com/jcorral/dotfiles.git /home/dev/dotfiles && \
-  cd /home/dev/dotfiles &&  git submodule update --init --recursive
-
-# Make the vim custom preferences, bash profile and custom scripts
-# available for the dev user.
-RUN ln -fs /home/dev/dotfiles/.zshrc /home/dev/.zshrc && \
-    ln -fs /home/dev/dotfiles/.vim /home/dev/.vim && \
-    ln -fs /home/dev/dotfiles/.vimrc /home/dev/.vimrc
-
-# Configure the .vim YouCompleteMe plugin.
-RUN /home/dev/dotfiles/.vim/bundle/YouCompleteMe/install.py
-
-ENTRYPOINT ["/bin/zsh"]
+WORKDIR /home/dev
+ENTRYPOINT ["zsh"]
