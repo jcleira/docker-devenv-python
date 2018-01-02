@@ -4,7 +4,6 @@ LABEL maintainer "jmc.leira@gmail.com"
 USER root
 # The following commands are copied from the dockerhub alpine dockerfile.
 
-# ensure local python is preferred over distribution python
 ENV PATH /usr/local/bin:$PATH
 
 # http://bugs.python.org/issue19846
@@ -70,6 +69,9 @@ RUN set -ex \
 		--with-system-ffi \
 		--without-ensurepip \
 	&& make -j "$(nproc)" \
+# set thread stack size to 1MB so we don't segfault before we hit sys.getrecursionlimit()
+# https://github.com/alpinelinux/aports/commit/2026e1259422d4e0cf92391ca2d3844356c649d0
+		EXTRA_CFLAGS="-DTHREAD_STACK_SIZE=0x100000" \
 	&& make install \
 	\
 	&& runDeps="$( \
@@ -121,7 +123,6 @@ RUN set -ex; \
 			\( -type f -a \( -name '*.pyc' -o -name '*.pyo' \) \) \
 		\) -exec rm -rf '{}' +; \
 	rm -f get-pip.py
-
 
 USER dev
 WORKDIR /home/dev
